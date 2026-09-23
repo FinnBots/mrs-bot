@@ -270,7 +270,9 @@ const EXTRA='EXTRA';
 // popped by the orb 500; apple crush chain 1000/2000/4000/6000/8000; diamond 8000 + a free life.
 const CHERRY_PTS=50, PATCH_BONUS=500, BALL_KILL=500;
 const CRUSH_PTS=[1000,2000,4000,6000,8000];    // 1,2,3,4,5+ creeps crushed by one apple
-const FOOD_PTS=[500,800,1000,1500,2000,3000,5000,8000];  // bonus treat by level
+// arcade Mr. Do!: the bonus treat is 1000 on screen 1 and grows +500 per screen,
+// capping at 9500 from screen 18 on.
+function foodPts(level){ return Math.min(9500, 1000 + 500*(Math.max(1,level)-1)); }
 const DIAMOND_PTS=8000;
 const EXTRA_SCORE_STEP=5000;                   // arcade: an Alphamonster every 5000 pts
 // the orb's recharge grows with each KILL and, after 3+, "takes a dangerously long time to return"
@@ -596,7 +598,7 @@ function updateHatch(s,dt,ev){
         const c=mkCreep(h.cx,h.cy,'creep'); c.lead=(s._rng()<0.45); s.creeps.push(c); s.budget--; ev.emit=true;
         if(s.budget===0) s.foodArmed=true; } }
   } else if(s.foodArmed && !s.food && !s.diamond){    // all creeps out → the hatch offers a treat
-    s.food={ cx:s.hatch.cx, cy:s.hatch.cy, val:FOOD_PTS[Math.min(s.level-1,FOOD_PTS.length-1)] };
+    s.food={ cx:s.hatch.cx, cy:s.hatch.cy, val:foodPts(s.level) };
     s.foodArmed=false; ev.foodshow=true;
   }
   if(s.food && s.player.cx===s.food.cx && s.player.cy===s.food.cy){
@@ -625,7 +627,7 @@ function loseLife(s,ev){ if(s.player.invuln>0) return;
   s.creeps.forEach(e=>{ e.cx=e.spawn.cx=s.hatch.cx; e.cy=e.spawn.cy=s.hatch.cy; e.from=null; e.moving=false; e.prog=0; e.mode=e.blue?'digger':'creep'; e.bestDist=1e9; e.stuckT=0; e.frozen=true; e.frozenT=0.8; });
   s.respawnT=0.8;
 }
-function levelClear(s,ev){ if(s.clearT>0) return; s.clearT=1.8; s.score+=800; ev.clear=true; }
+function levelClear(s,ev){ if(s.clearT>0) return; s.clearT=1.8; ev.clear=true; }   // arcade: no scene-clear bonus
 
 // ---- top-level tick -------------------------------------------------------
 function stepGame(s, dtMs){
