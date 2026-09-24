@@ -548,6 +548,7 @@ function buildLevel(level, rng){
 
 function mkCreep(cx,cy,mode){ return { cx,cy, from:null, prog:0, moving:false, dir:'d',
   mode:mode||'creep', modeT:0, bestDist:1e9, stuckT:0, alive:true, frozen:false, frozenT:0,
+  anchor:{cx,cy}, anchorT:0, wantDig:false, nestT:0, leftNest:false,
   alpha:false, letter:'', blue:false, lead:false, spawn:{cx,cy} }; }
 
 function loadLevel(s){
@@ -558,8 +559,13 @@ function loadLevel(s){
   s.creeps=[]; s.ball=null; s.restBall=null; s.diamond=null;
   // per-level creep budget + emit cadence — the creeps are the pressure, so pour them out EARLY and
   // often (a lone slow trailing creep let you clear cherries untouched; the arcade keeps you hunted).
-  s.budget = clampc(4+Math.floor(s.level*0.9), 4, 10);
-  s.emitT = 0.4; s.emitEvery = Math.max(0.9, 1.7 - s.level*0.08);
+  // REBALANCED 2026-09-24, together with the nest fix above. Until then roughly 60% of creeps
+  // never left the hatch chamber, so the old numbers (up to 10 creeps, poured out fast, faster
+  // than the Bot) were tuned against a field where most enemies were scenery. With every creep
+  // actually joining the chase those numbers were brutal — an enemy-AWARE test player fell from
+  // scene 10 to scene 3.7. Fewer creeps, emitted slower, restores a fair fight (~scene 6).
+  s.budget = clampc(2+Math.floor(s.level*0.5), 2, 5);
+  s.emitT = 0.8; s.emitEvery = Math.max(1.4, 2.4 - s.level*0.08);
   s.food=null; s.foodArmed=false; s.freezeT=0;
   s.alphaOut=false;                              // at most one Alphamonster on the field
   s.patchRun=0; s.patchT=0;                       // consecutive-cherry streak for the group bonus
@@ -708,10 +714,37 @@ function chaseDir(s,e,who,rng,tgt){ const opts=[];
 }
 function updateCreeps(s,dt,rng,ev){
   const P=s.player, dist=(cx,cy)=>Math.abs(cx-P.cx)+Math.abs(cy-P.cy);
-  const base=Math.min(4.7+(s.level-1)*0.30, 6.2);   // ~Bot speed at scene 1, OVERTAKES the Bot (5.2) by scene ~3 — real pressure
+  // Caps at the Bot's own 5.2, i.e. PARITY — creeps no longer outrun you. That reverses a
+  // deliberate 2026-09-23 choice ("OVERTAKES the Bot by scene ~3"), and the reason is that the
+  // choice was made while most creeps sat inert in the nest. Now that the whole field chases,
+  // pressure comes from numbers and cut-offs rather than raw speed; outrunning a lone creep is
+  // possible again, being surrounded is not. Revisit together, not one without the other.
+  const base=Math.min(4.3+(s.level-1)*0.18, 5.2);
   for(const e of s.creeps){
     if(!e.alive) continue;
     if(e.frozen){ e.frozenT-=dt; if(e.frozenT<=0){ e.frozen=false; } continue; }
+    // CONFINEMENT (2026-09-24) — why the enemies "never escaped unless you helped them".
+    // Two compounding faults. (1) `bestDist` is distance to the BOT, so a creep idling in the
+    // 3x3 hatch chamber had its frustration timer reset every time the PLAYER wandered closer —
+    // d0 hit a new all-time low through no effort of its own, so it never reached the 1.2s
+    // digger threshold and could never dig out. (2) Both timers sat BELOW the `if(e.moving)
+    // ... continue` guard, so they only advanced on the one frame per cell that a creep is idle
+    // — a circulating creep is moving nearly every frame, so they barely accumulated at all.
+    // Neither showed up in the termination sim: a STILL bot pins d0, and a fully boxed creep
+    // goes idle, so both timers ran normally there and every creep escaped.
+    // So: measure the creep's OWN displacement, in REAL time, above the moving guard. Net
+    // movement of <= 2 cells over 2.5s means it is shuffling in a pocket whatever the bot does.
+    // (a) THE NEST: until a creep has once left the 3x3 hatch chamber, it must get out. This is
+    //     the reported bug and it is worth its own short fuse — a creep that has never joined the
+    //     chase is not a threat, it is scenery.
+    if(!e.leftNest){
+      if(Math.max(Math.abs(e.cx-e.spawn.cx),Math.abs(e.cy-e.spawn.cy))>1) e.leftNest=true;
+      else { e.nestT+=dt; if(e.nestT>=2.5){ e.wantDig=true; e.nestT=0; } }
+    }
+    // NOTE: deliberately NO general "confined anywhere" rule. A 2.5s version of one turned every
+    //     creep into a near-permanent digger, and diggers cut straight lines through sand, so the
+    //     calibrated difficulty collapsed (an enemy-ignoring test bot went from scene 10 to
+    //     scene 3). The reported fault was the NEST specifically; fix that and nothing else.
     const digging=(e.mode==='digger'||e.blue);
     const SPD=(digging? base*0.82 : base) * (e.alpha?0.9:1);
     if(e.moving){ e.prog+=SPD*dt;
@@ -726,7 +759,12 @@ function updateCreeps(s,dt,rng,ev){
     const d0=dist(e.cx,e.cy);
     if(d0<e.bestDist){ e.bestDist=d0; e.stuckT=0; } else { e.stuckT+=dt; }
     if(e.mode==='digger'){ e.modeT-=dt; if(e.modeT<=0 && s.grid[e.cy][e.cx]===0){ e.mode='creep'; e.bestDist=d0; e.stuckT=0; } }
-    if(e.mode==='creep' && !e.blue && e.stuckT>=1.2){ e.mode='digger'; e.modeT=2.0+rng()*1.2; e.bestDist=d0; e.stuckT=0; ev.transform=true; }
+    if(e.mode==='creep' && !e.blue && (e.stuckT>=1.2 || e.wantDig)){
+      // A nest break-out is a SHORT burst — one wall's worth of digging, then straight back to
+      // tunnel-chasing. The normal "frustrated" dig (stuckT) keeps its longer arcade spell.
+      const breakout=e.wantDig && e.stuckT<1.2;
+      e.mode='digger'; e.modeT = breakout ? 0.9 : (2.0+rng()*1.2);
+      e.bestDist=d0; e.stuckT=0; e.wantDig=false; e.anchor={cx:e.cx,cy:e.cy}; e.anchorT=0; ev.transform=true; }
     const who=(e.mode==='digger'||e.blue)?'digger':'creep';
     // interceptors aim a couple cells AHEAD of a moving Bot (cut-off); tail-chasers aim at the Bot.
     // Under no input the Bot never moves, so the lead offset is 0 → everyone converges → still terminates.
@@ -773,7 +811,7 @@ function loseLife(s,ev){ if(s.player.invuln>0) return;
   // respawn: Bot back to the nook, orb home, creeps sent back to the hatch briefly
   const p=s.player, st=s.start; p.cx=st.cx; p.cy=st.cy; p.from=null; p.moving=false; p.prog=0; p.dir='d'; p.invuln=1.4;
   s.ball=null; s.restBall=null; s.ballKills=0; s.ballCd=0;
-  s.creeps.forEach(e=>{ e.cx=e.spawn.cx=s.hatch.cx; e.cy=e.spawn.cy=s.hatch.cy; e.from=null; e.moving=false; e.prog=0; e.mode=e.blue?'digger':'creep'; e.bestDist=1e9; e.stuckT=0; e.frozen=true; e.frozenT=0.8; });
+  s.creeps.forEach(e=>{ e.cx=e.spawn.cx=s.hatch.cx; e.cy=e.spawn.cy=s.hatch.cy; e.from=null; e.moving=false; e.prog=0; e.mode=e.blue?'digger':'creep'; e.bestDist=1e9; e.stuckT=0; e.anchor={cx:e.cx,cy:e.cy}; e.anchorT=0; e.nestT=0; e.leftNest=false; e.frozen=true; e.frozenT=0.8; });
   s.respawnT=0.8;
 }
 function levelClear(s,ev){ if(s.clearT>0) return; s.clearT=1.8; ev.clear=true; }   // arcade: no scene-clear bonus
