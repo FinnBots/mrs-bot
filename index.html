@@ -541,7 +541,7 @@ const CFG = { name:'Mrs Bot', memoNS:'MRSB', chassis:'sink-leaderboard',
               subdomain:'mrsbot.finnstergram.com', port:9021, hero:106, accent:'#3a6ff7', entryOIL:25, scorePost:1 };
 
 /* ==========================================================================
-   MRS BOT ENGINE — Mr. Do!-loop (dig / power-ball / apple-drop). FinnBots
+   MRS BOT ENGINE — the dig-and-crush original-loop (dig / power-ball / apple-drop). FinnBots
    ORIGINAL art + name — Bot 106 is the hero, the creeps are our own botty
    monsters, our palette; NONE of the original game's sprites/characters/name.
    Grid world: the screen is packed sand; Mrs Bot (Bot 106) digs tunnels to
@@ -561,7 +561,7 @@ const EXTRA='EXTRA';
 // popped by the orb 500; apple crush chain 1000/2000/4000/6000/8000; diamond 8000 + a free life.
 const CHERRY_PTS=50, PATCH_BONUS=500, BALL_KILL=500;
 const CRUSH_PTS=[1000,2000,4000,6000,8000];    // 1,2,3,4,5+ creeps crushed by one apple
-// arcade Mr. Do!: the bonus treat is 1000 on screen 1 and grows +500 per screen,
+// arcade the dig-and-crush original: the bonus treat is 1000 on screen 1 and grows +500 per screen,
 // capping at 9500 from screen 18 on.
 function foodPts(level){ return Math.min(9500, 1000 + 500*(Math.max(1,level)-1)); }
 const DIAMOND_PTS=8000;
