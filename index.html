@@ -617,6 +617,7 @@ const DIAMOND_PTS=8000;
 const EXTRA_SCORE_STEP=5000;                   // arcade: an Alphamonster every 5000 pts
 // the orb's recharge grows with each KILL and, after 3+, "takes a dangerously long time to return"
 const BALL_KILLCD=[0.8,1.6,2.8,4.2,5.5], BALL_MISSCD=0.25;
+const FIRE_BUF=0.20;   // seconds a fire press is held for if the orb is not yet back
 // deterministic xorshift so the headless termination sim is stable
 function mkRng(seed){ let x=seed>>>0||1; return ()=>{ x^=x<<13;x>>>=0;x^=x>>>17;x^=x<<5;x>>>=0; return x/4294967296; }; }
 function clampc(v,a,b){ return Math.max(a,Math.min(b,v)); }
@@ -760,14 +761,14 @@ function loadLevel(s){
   s.food=null; s.foodArmed=false; s.freezeT=0;
   s.alphaOut=false;                              // at most one Alphamonster on the field
   s.patchRun=0; s.patchT=0;                       // consecutive-cherry streak for the group bonus
-  s.ballKills=0; s.ballCd=0;                       // the orb's growing recharge (resets per scene)
+  s.ballKills=0; s.ballCd=0; s.fireBuf=0;          // the orb's growing recharge (resets per scene)
   s.respawnT=0; s.clearT=0; s.levelTime=0;
   s.world=(s.level-1)%3;                          // rotate the sand palette so scenes also LOOK different
 }
 function newRun(){
   const s={ phase:'play', score:0, lives:3, level:1, timeMs:0,
             extraNext:EXTRA_SCORE_STEP, extra:0,   // EXTRA letters collected 0..5
-            inDX:0, inDY:0, inFire:false, firePrev:false,
+            inDX:0, inDY:0, inFire:false, firePrev:false, fireBuf:0,
             cherEaten:0, grid:null, player:null, creeps:[], apples:[], _rng:mkRng(0x1a2b3c4d) };
   loadLevel(s); return s;
 }
@@ -818,8 +819,20 @@ function retrieveBall(s,p){ if(s.restBall && s.restBall.cx===p.cx && s.restBall.
 
 // ---- power orb: kills instantly, unlimited range, NAVIGATES THE TUNNELS on its own,
 //      then returns to hand with a recharge that grows with every kill (faithful to the arcade).
-function throwBall(s){ const p=s.player; if(s.ball||s.restBall||p.moving||s.ballCd>0) return;
-  s.ball={ cx:p.cx, cy:p.cy, dir:p.dir, from:{cx:p.cx,cy:p.cy}, prog:0, steps:0, life:260 }; }
+/* THE THROW IS NOT REFUSED FOR WALKING (2026-10-02, Founder: "the ball weapon
+   doesn't work properly").  `p.moving` used to be in this guard, and the Bot is
+   mid-cell-step for most of any real run: measured on a driven engine, 250 frames
+   refused the throw for movement against 22 that allowed it — the fire button was
+   dead for 92% of the moments a player would press it.  Worse, `inFire` is
+   EDGE-triggered, so the press was DISCARDED rather than deferred: you pressed,
+   nothing happened, and nothing ever happened.  Same shape as BOTMAN turning only
+   on the exact tile centre — an input accepted inside a window the player cannot
+   see or aim for.  The arcade lets you throw on the move; so do we.  While
+   stepping, p.cx/p.cy is the cell being entered, so the orb leaves from the Bot's
+   nose, in the Bot's facing direction. */
+function throwBall(s){ const p=s.player; if(s.ball||s.restBall||s.ballCd>0) return false;
+  s.ball={ cx:p.cx, cy:p.cy, dir:p.dir, from:{cx:p.cx,cy:p.cy}, prog:0, steps:0, life:260 };
+  return true; }
 function openBallDir(s,cx,cy,k){ const d=DIRS[k], nx=cx+d[0], ny=cy+d[1];
   return inb(nx,ny) && s.grid[ny][nx]===0 && !appleAt(s,nx,ny); }
 function nearestCreep(s,cx,cy){ let best=null,bd=1e9;
@@ -829,7 +842,16 @@ function updateBall(s,dt,ev){
   b.prog+=SPD*dt;
   while(b.prog>=1){ b.prog-=1;
     if(b.steps>0){
-      const hit=s.creeps.find(e=>e.alive && !e.frozen && sameCell(e,b.cx,b.cy));
+      /* A creep OCCUPIES an interval, not a cell. `e.cx/e.cy` is the cell it is
+         stepping INTO, so a creep halfway between two cells is drawn across both
+         while this test only ever saw the far one — the orb flew straight through
+         a sprite it visibly touched. Measured on the real engine: 8 pass-throughs
+         in 344 orb cell-steps, about one in every five throws. Accept the cell it
+         came FROM as well, which also subsumes the head-on swap (orb A->B while
+         the creep steps B->A, exchanging cells and never sharing a destination) —
+         the crossing test this factory already requires of every fast mover. */
+      const hit=s.creeps.find(e=>e.alive && !e.frozen &&
+        (sameCell(e,b.cx,b.cy) || (e.moving && e.from && sameCell(e.from,b.cx,b.cy))));
       if(hit){ popCreep(s,hit,BALL_KILL,ev); s.ballCd=BALL_KILLCD[Math.min(s.ballKills,BALL_KILLCD.length-1)]; s.ballKills++; s.ball=null; ev.ballback=true; return; }
       if(b.cx===s.player.cx && b.cy===s.player.cy){ s.ball=null; s.ballCd=BALL_MISSCD; ev.ballback=true; return; }  // caught, quick reload on a miss
     }
@@ -1001,7 +1023,7 @@ function loseLife(s,ev){ if(s.player.invuln>0) return;
   if(s.lives<=0){ s.phase='dead'; ev.over=true; return; }
   // respawn: Bot back to the nook, orb home, creeps sent back to the hatch briefly
   const p=s.player, st=s.start; p.cx=st.cx; p.cy=st.cy; p.from=null; p.moving=false; p.prog=0; p.dir='d'; p.invuln=1.4;
-  s.ball=null; s.restBall=null; s.ballKills=0; s.ballCd=0;
+  s.ball=null; s.restBall=null; s.ballKills=0; s.ballCd=0; s.fireBuf=0;
   s.creeps.forEach(e=>{ e.cx=e.spawn.cx=s.hatch.cx; e.cy=e.spawn.cy=s.hatch.cy; e.from=null; e.moving=false; e.prog=0; e.mode=e.blue?'digger':'creep'; e.bestDist=1e9; e.stuckT=0; e.anchor={cx:e.cx,cy:e.cy}; e.anchorT=0; e.nestT=0; e.leftNest=false; e.frozen=true; e.frozenT=0.8; });
   s.respawnT=0.8;
 }
@@ -1016,7 +1038,12 @@ function stepGame(s, dtMs){
   if(s.ballCd>0) s.ballCd-=dt;
   if(s.respawnT>0) s.respawnT-=dt;
   updatePlayer(s,dt,ev);
-  if(s.inFire && !s.firePrev) throwBall(s);
+  /* A press that lands while the orb is genuinely unavailable (still out, or
+     recharging) is held for a moment rather than eaten. FIRE_BUF is short on
+     purpose: it forgives a near-miss, it does not queue a throw you have
+     forgotten about — the same forgiveness BOTMAN's cornering gives a turn. */
+  if(s.inFire && !s.firePrev){ if(!throwBall(s)) s.fireBuf=FIRE_BUF; }
+  else if(s.fireBuf>0){ s.fireBuf=Math.max(0,s.fireBuf-dt); if(throwBall(s)) s.fireBuf=0; }
   s.firePrev=s.inFire;
   updateBall(s,dt,ev);
   updateApples(s,dt,ev);                 if(s.phase!=='play') return ev;
